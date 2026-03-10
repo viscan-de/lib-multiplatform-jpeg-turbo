@@ -390,6 +390,20 @@ if(NOT NEON_INTRINSICS)
   set(SIMD_SOURCES ${SIMD_SOURCES} arm/aarch${BITS}/jsimd_neon.S)
 endif()
 
+if(UNIX AND BITS EQUAL 32)
+  include(CheckSymbolExists)
+  check_symbol_exists(getauxval sys/auxv.h HAVE_GETAUXVAL)
+  if(HAVE_GETAUXVAL)
+    set_source_files_properties(arm/aarch${BITS}/jsimd.c PROPERTIES
+      COMPILE_DEFINITIONS HAVE_GETAUXVAL)
+  endif()
+  check_symbol_exists(elf_aux_info sys/auxv.h HAVE_ELF_AUX_INFO)
+  if(HAVE_ELF_AUX_INFO)
+    set_source_files_properties(arm/aarch${BITS}/jsimd.c PROPERTIES
+      COMPILE_DEFINITIONS HAVE_ELF_AUX_INFO)
+  endif()
+endif()
+
 add_library(simd OBJECT ${SIMD_SOURCES} arm/aarch${BITS}/jsimd.c)
 
 if(CMAKE_POSITION_INDEPENDENT_CODE OR ENABLE_SHARED)
@@ -448,7 +462,7 @@ set(CMAKE_REQUIRED_FLAGS -Wa,-mloongson-mmi,-mloongson-ext)
 
 check_c_source_compiles("
   #if !(defined(__mips__) && __mips_isa_rev < 6)
-  #error Loongson MMI can't work with MIPS Release 6+
+  #error \"Loongson MMI can't work with MIPS Release 6+\"
   #endif
   int main(void) {
     int c = 0, a = 0, b = 0;
@@ -523,6 +537,20 @@ set(SIMD_SOURCES powerpc/jccolor-altivec.c powerpc/jcgray-altivec.c
 set_source_files_properties(${SIMD_SOURCES} PROPERTIES
   COMPILE_FLAGS -maltivec)
 
+if(UNIX)
+  include(CheckSymbolExists)
+  check_symbol_exists(getauxval sys/auxv.h HAVE_GETAUXVAL)
+  if(HAVE_GETAUXVAL)
+    set_source_files_properties(powerpc/jsimd.c PROPERTIES
+      COMPILE_DEFINITIONS HAVE_GETAUXVAL)
+  endif()
+  check_symbol_exists(elf_aux_info sys/auxv.h HAVE_ELF_AUX_INFO)
+  if(HAVE_ELF_AUX_INFO)
+    set_source_files_properties(powerpc/jsimd.c PROPERTIES
+      COMPILE_DEFINITIONS HAVE_ELF_AUX_INFO)
+  endif()
+endif()
+
 add_library(simd OBJECT ${SIMD_SOURCES} powerpc/jsimd.c)
 
 if(CMAKE_POSITION_INDEPENDENT_CODE OR ENABLE_SHARED)
@@ -539,3 +567,8 @@ else()
 simd_fail("SIMD extensions not available for this CPU (${CMAKE_SYSTEM_PROCESSOR})")
 
 endif() # CPU_TYPE
+
+if(WITH_SIMD AND ENABLE_STATIC)
+  add_executable(simdcoverage simdcoverage.c)
+  target_link_libraries(simdcoverage jpeg-static)
+endif()

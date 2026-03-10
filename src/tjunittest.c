@@ -1,6 +1,6 @@
 /*
- * Copyright (C)2009-2014, 2017-2019, 2022-2024 D. R. Commander.
- *                                              All Rights Reserved.
+ * Copyright (C) 2009-2014, 2017-2019, 2022-2026 D. R. Commander.
+ *                                               All Rights Reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions are met:
@@ -28,7 +28,7 @@
  */
 
 /*
- * This program tests the various code paths in the TurboJPEG C Wrapper
+ * This program tests the various code paths in the TurboJPEG C API
  */
 
 #ifdef _MSC_VER
@@ -199,17 +199,17 @@ static void initBuf(void *buf, int w, int h, int pf, int bottomUp)
 }
 
 
-static int getVal(void *buf, int index)
+static int getVal(void *buf, int index, int targetPrecision)
 {
-  if (precision <= 8)
+  if (targetPrecision <= 8)
     return ((unsigned char *)buf)[index];
-  else if (precision <= 12)
+  else if (targetPrecision <= 12)
     return ((short *)buf)[index];
   else
     return ((unsigned short *)buf)[index];
 }
 
-static int checkBuf(void *buf, int w, int h, int pf,  int subsamp,
+static int checkBuf(void *buf, int w, int h, int pf, int subsamp,
                     tjscalingfactor sf, int bottomUp)
 {
   int roffset = tjRedOffset[pf];
@@ -230,10 +230,10 @@ static int checkBuf(void *buf, int w, int h, int pf,  int subsamp,
 
         if (bottomUp) index = (h - row - 1) * w + col;
         else index = row * w + col;
-        c = getVal(buf, index * ps);
-        m = getVal(buf, index * ps + 1);
-        y = getVal(buf, index * ps + 2);
-        k = getVal(buf, index * ps + 3);
+        c = getVal(buf, index * ps, precision);
+        m = getVal(buf, index * ps + 1, precision);
+        y = getVal(buf, index * ps + 2, precision);
+        k = getVal(buf, index * ps + 3, precision);
         if (((row / blocksize) + (col / blocksize)) % 2 == 0) {
           CHECKVALMAX(c);  CHECKVALMAX(m);  CHECKVALMAX(y);
           if (row < halfway) CHECKVALMAX(k)
@@ -254,10 +254,11 @@ static int checkBuf(void *buf, int w, int h, int pf,  int subsamp,
 
       if (bottomUp) index = (h - row - 1) * w + col;
       else index = row * w + col;
-      r = getVal(buf, index * ps + roffset);
-      g = getVal(buf, index * ps + goffset);
-      b = getVal(buf, index * ps + boffset);
-      a = aoffset >= 0 ? getVal(buf, index * ps + aoffset) : maxSample;
+      r = getVal(buf, index * ps + roffset, precision);
+      g = getVal(buf, index * ps + goffset, precision);
+      b = getVal(buf, index * ps + boffset, precision);
+      a = aoffset >= 0 ? getVal(buf, index * ps + aoffset, precision) :
+                         maxSample;
       if (((row / blocksize) + (col / blocksize)) % 2 == 0) {
         if (row < halfway) {
           CHECKVALMAX(r);  CHECKVALMAX(g);  CHECKVALMAX(b);
@@ -289,15 +290,16 @@ bailout:
     for (row = 0; row < h; row++) {
       for (col = 0; col < w; col++) {
         if (pf == TJPF_CMYK)
-          printf("%.3d/%.3d/%.3d/%.3d ", getVal(buf, (row * w + col) * ps),
-                 getVal(buf, (row * w + col) * ps + 1),
-                 getVal(buf, (row * w + col) * ps + 2),
-                 getVal(buf, (row * w + col) * ps + 3));
+          printf("%.3d/%.3d/%.3d/%.3d ",
+                 getVal(buf, (row * w + col) * ps, precision),
+                 getVal(buf, (row * w + col) * ps + 1, precision),
+                 getVal(buf, (row * w + col) * ps + 2, precision),
+                 getVal(buf, (row * w + col) * ps + 3, precision));
         else
           printf("%.3d/%.3d/%.3d ",
-                 getVal(buf, (row * w + col) * ps + roffset),
-                 getVal(buf, (row * w + col) * ps + goffset),
-                 getVal(buf, (row * w + col) * ps + boffset));
+                 getVal(buf, (row * w + col) * ps + roffset, precision),
+                 getVal(buf, (row * w + col) * ps + goffset, precision),
+                 getVal(buf, (row * w + col) * ps + boffset, precision));
       }
       printf("\n");
     }
@@ -407,6 +409,7 @@ static void compTest(tjhandle handle, unsigned char **dstBuf, size_t *dstSize,
   int jpegQual = tj3Get(handle, TJPARAM_QUALITY);
   const char *buStrLong = bottomUp ? "Bottom-Up" : "Top-Down ";
   const char *buStr = bottomUp ? "BU" : "TD";
+  tjhandle handle2 = NULL;
 
   if ((srcBuf = malloc(w * h * tjPixelSize[pf] * sampleSize)) == NULL)
       THROW("Memory allocation failure");
@@ -415,30 +418,82 @@ static void compTest(tjhandle handle, unsigned char **dstBuf, size_t *dstSize,
   if (*dstBuf && *dstSize > 0) memset(*dstBuf, 0, *dstSize);
 
   if (doYUV) {
+    unsigned char *yuvPtr, *yuvPlanes[3] = { NULL, NULL, NULL };
+    int i, yuvStrides[3] = { 0, 0, 0 }, success;
+    size_t dstBufSize;
+    MD5_CTX md5ctx;
+    char *md5ref, md5refbuf[65], *md5sum, md5buf[65];
     size_t yuvSize = tj3YUVBufSize(w, yuvAlign, h, subsamp);
-    tjscalingfactor sf = { 1, 1 };
-    tjhandle handle2 = NULL;
+
+    if ((yuvBuf = (unsigned char *)malloc(yuvSize)) == NULL)
+      THROW("Memory allocation failure");
+
+    printf("%s %s -> YUV %s ... ", pfStr, buStrLong, subNameLong[subsamp]);
 
     if ((handle2 = tj3Init(TJINIT_COMPRESS)) == NULL)
       THROW_TJ(NULL);
     TRY_TJ(handle2, tj3Set(handle2, TJPARAM_BOTTOMUP, bottomUp));
     TRY_TJ(handle2, tj3Set(handle2, TJPARAM_SUBSAMP, subsamp));
+    /* Verify that tj3EncodeYUV*8() ignores TJPARAM_LOSSLESS and
+       TJPARAM_COLORSPACE. */
+    TRY_TJ(handle2, tj3Set(handle2, TJPARAM_LOSSLESS, 1));
+    TRY_TJ(handle2, tj3Set(handle2, TJPARAM_COLORSPACE, TJCS_RGB));
 
-    if ((yuvBuf = (unsigned char *)malloc(yuvSize)) == NULL)
-      THROW("Memory allocation failure");
     memset(yuvBuf, 0, yuvSize);
-
-    printf("%s %s -> YUV %s ... ", pfStr, buStrLong, subNameLong[subsamp]);
     TRY_TJ(handle2, tj3EncodeYUV8(handle2, (unsigned char *)srcBuf, w, 0, h,
                                   pf, yuvBuf, yuvAlign));
-    tj3Destroy(handle2);
-    if (checkBufYUV(yuvBuf, w, h, subsamp, sf)) printf("Passed.\n");
+    success = checkBufYUV(yuvBuf, w, h, subsamp, TJUNSCALED);
+
+    /* Verify that tj3EncodeYUVPlanes8() produces the same results. */
+    yuvPtr = yuvBuf;
+    for (i = 0; i < (subsamp == TJSAMP_GRAY ? 1 : 3); i++) {
+      int planeWidth, planeHeight;
+      size_t planeSize;
+
+      if ((planeWidth = tj3YUVPlaneWidth(i, w, subsamp)) == 0 ||
+          (planeHeight = tj3YUVPlaneHeight(i, h, subsamp)) == 0)
+        THROW_TJ(NULL);
+      yuvStrides[i] = PAD(planeWidth, yuvAlign);
+      if ((planeSize = tj3YUVPlaneSize(i, w, yuvStrides[i], h, subsamp)) == 0)
+        THROW_TJ(NULL);
+      yuvPlanes[i] = yuvPtr;
+      yuvPtr += planeSize + yuvStrides[i] - planeWidth;
+    }
+    memset(yuvBuf, 0, yuvSize);
+    TRY_TJ(handle2, tj3EncodeYUVPlanes8(handle2, (unsigned char *)srcBuf, w, 0,
+                                        h, pf, yuvPlanes, yuvStrides));
+    success &= checkBufYUV(yuvBuf, w, h, subsamp, TJUNSCALED);
+    if (success) printf("Passed.\n");
     else printf("FAILED!\n");
+
+    tj3Destroy(handle2);  handle2 = NULL;
 
     printf("YUV %s %s -> JPEG Q%d ... ", subNameLong[subsamp], buStrLong,
            jpegQual);
+
+    /* Verify that tj3CompressFromYUV*8() ignores TJPARAM_LOSSLESS and
+       TJPARAM_COLORSPACE. */
+    TRY_TJ(handle, tj3Set(handle, TJPARAM_LOSSLESS, 1));
+    TRY_TJ(handle, tj3Set(handle, TJPARAM_COLORSPACE, TJCS_RGB));
+    dstBufSize = *dstSize;
     TRY_TJ(handle, tj3CompressFromYUV8(handle, yuvBuf, w, yuvAlign, h, dstBuf,
                                        dstSize));
+    MD5Init(&md5ctx);
+    MD5Update(&md5ctx, *dstBuf, *dstSize);
+    md5ref = MD5End(&md5ctx, md5refbuf);
+
+    /* Verify that tj3CompressFromYUVPlanes8() produces the same results. */
+    *dstSize = dstBufSize;
+    if (*dstBuf && *dstSize > 0) memset(*dstBuf, 0, *dstSize);
+    TRY_TJ(handle, tj3CompressFromYUVPlanes8(handle,
+                                             (const unsigned char **)yuvPlanes,
+                                             w, yuvStrides, h, dstBuf,
+                                             dstSize));
+    MD5Init(&md5ctx);
+    MD5Update(&md5ctx, *dstBuf, *dstSize);
+    md5sum = MD5End(&md5ctx, md5buf);
+    if (strcasecmp(md5sum, md5ref))
+      THROW_MD5("JPEG image", md5sum, md5ref);
   } else {
     if (lossless) {
       TRY_TJ(handle, tj3Set(handle, TJPARAM_PRECISION, precision));
@@ -468,6 +523,7 @@ static void compTest(tjhandle handle, unsigned char **dstBuf, size_t *dstSize,
   printf("Done.\n  Result in %s\n", tempStr);
 
 bailout:
+  tj3Destroy(handle2);
   free(yuvBuf);
   free(srcBuf);
 }
@@ -479,11 +535,13 @@ static void _decompTest(tjhandle handle, unsigned char *jpegBuf,
 {
   void *dstBuf = NULL;
   unsigned char *yuvBuf = NULL;
+  int success = 1;
   int _hdrw = 0, _hdrh = 0, _hdrsubsamp;
   int scaledWidth = TJSCALED(w, sf);
   int scaledHeight = TJSCALED(h, sf);
   size_t dstSize = 0;
   int bottomUp = tj3Get(handle, TJPARAM_BOTTOMUP);
+  tjhandle handle2 = NULL;
 
   TRY_TJ(handle, tj3SetScalingFactor(handle, sf));
 
@@ -502,35 +560,68 @@ static void _decompTest(tjhandle handle, unsigned char *jpegBuf,
   memset(dstBuf, 0, dstSize * sampleSize);
 
   if (doYUV) {
+    unsigned char *yuvPtr, *yuvPlanes[3] = { NULL, NULL, NULL };
+    int i, yuvStrides[3] = { 0, 0, 0 };
     size_t yuvSize = tj3YUVBufSize(scaledWidth, yuvAlign, scaledHeight,
                                    subsamp);
-    tjhandle handle2 = NULL;
+
+    if ((yuvBuf = (unsigned char *)malloc(yuvSize)) == NULL)
+      THROW("Memory allocation failure");
+
+    printf("JPEG -> YUV %s ", subNameLong[subsamp]);
+    if (sf.num != 1 || sf.denom != 1)
+      printf("%d/%d ... ", sf.num, sf.denom);
+    else printf("... ");
+
+    memset(yuvBuf, 0, yuvSize);
+    TRY_TJ(handle, tj3DecompressToYUV8(handle, jpegBuf, jpegSize, yuvBuf,
+                                       yuvAlign));
+    success = checkBufYUV(yuvBuf, scaledWidth, scaledHeight, subsamp, sf);
+
+    /* Verify that tj3DecompressToYUVPlanes8() produces the same results. */
+    yuvPtr = yuvBuf;
+    for (i = 0; i < (subsamp == TJSAMP_GRAY ? 1 : 3); i++) {
+      int planeWidth, planeHeight;
+      size_t planeSize;
+
+      if ((planeWidth = tj3YUVPlaneWidth(i, scaledWidth, subsamp)) == 0 ||
+          (planeHeight = tj3YUVPlaneHeight(i, scaledHeight, subsamp)) == 0)
+        THROW_TJ(NULL);
+      yuvStrides[i] = PAD(planeWidth, yuvAlign);
+      if ((planeSize = tj3YUVPlaneSize(i, scaledWidth, yuvStrides[i],
+                                       scaledHeight, subsamp)) == 0)
+        THROW_TJ(NULL);
+      yuvPlanes[i] = yuvPtr;
+      yuvPtr += planeSize + yuvStrides[i] - planeWidth;
+    }
+    memset(yuvBuf, 0, yuvSize);
+    TRY_TJ(handle, tj3DecompressToYUVPlanes8(handle, jpegBuf, jpegSize,
+                                             yuvPlanes, yuvStrides));
+    success &= checkBufYUV(yuvBuf, scaledWidth, scaledHeight, subsamp, sf);
+    if (success) printf("Passed.\n");
+    else printf("FAILED!\n");
+
+    printf("YUV %s -> %s %s ... ", subNameLong[subsamp], pixFormatStr[pf],
+           bottomUp ? "Bottom-Up" : "Top-Down ");
 
     if ((handle2 = tj3Init(TJINIT_DECOMPRESS)) == NULL)
       THROW_TJ(NULL);
     TRY_TJ(handle2, tj3Set(handle2, TJPARAM_BOTTOMUP, bottomUp));
     TRY_TJ(handle2, tj3Set(handle2, TJPARAM_SUBSAMP, subsamp));
 
-    if ((yuvBuf = (unsigned char *)malloc(yuvSize)) == NULL)
-      THROW("Memory allocation failure");
-    memset(yuvBuf, 0, yuvSize);
-
-    printf("JPEG -> YUV %s ", subNameLong[subsamp]);
-    if (sf.num != 1 || sf.denom != 1)
-      printf("%d/%d ... ", sf.num, sf.denom);
-    else printf("... ");
-    TRY_TJ(handle, tj3DecompressToYUV8(handle, jpegBuf, jpegSize, yuvBuf,
-                                       yuvAlign));
-    if (checkBufYUV(yuvBuf, scaledWidth, scaledHeight, subsamp, sf))
-      printf("Passed.\n");
-    else printf("FAILED!\n");
-
-    printf("YUV %s -> %s %s ... ", subNameLong[subsamp], pixFormatStr[pf],
-           bottomUp ? "Bottom-Up" : "Top-Down ");
     TRY_TJ(handle2, tj3DecodeYUV8(handle2, yuvBuf, yuvAlign,
                                   (unsigned char *)dstBuf, scaledWidth, 0,
                                   scaledHeight, pf));
-    tj3Destroy(handle2);
+    success = checkBuf(dstBuf, scaledWidth, scaledHeight, pf, subsamp, sf,
+                       bottomUp);
+
+    /* Verify that tj3DecodeYUVPlanes8() produces the same results. */
+    TRY_TJ(handle2, tj3DecodeYUVPlanes8(handle2,
+                                        (const unsigned char **)yuvPlanes,
+                                        yuvStrides, (unsigned char *)dstBuf,
+                                        scaledWidth, 0, scaledHeight, pf));
+
+    tj3Destroy(handle2);  handle2 = NULL;
   } else {
     printf("JPEG -> %s %s ", pixFormatStr[pf],
            bottomUp ? "Bottom-Up" : "Top-Down ");
@@ -549,12 +640,14 @@ static void _decompTest(tjhandle handle, unsigned char *jpegBuf,
     }
   }
 
-  if (checkBuf(dstBuf, scaledWidth, scaledHeight, pf, subsamp, sf, bottomUp))
-    printf("Passed.");
+  success &= checkBuf(dstBuf, scaledWidth, scaledHeight, pf, subsamp, sf,
+                      bottomUp);
+  if (success) printf("Passed.");
   else printf("FAILED!");
   printf("\n");
 
 bailout:
+  tj3Destroy(handle2);
   free(yuvBuf);
   free(dstBuf);
 }
@@ -766,9 +859,17 @@ static void bufSizeTest(void)
         }
 
         if (doYUV) {
+          /* Verify that tj3EncodeYUV*8() ignores TJPARAM_LOSSLESS and
+             TJPARAM_COLORSPACE. */
+          TRY_TJ(handle, tj3Set(handle, TJPARAM_LOSSLESS, 1));
+          TRY_TJ(handle, tj3Set(handle, TJPARAM_COLORSPACE, TJCS_RGB));
           TRY_TJ(handle, tj3EncodeYUV8(handle, (unsigned char *)srcBuf, w, 0,
                                        h, TJPF_BGRX, dstBuf, yuvAlign));
         } else {
+          /* Verify that the API is hardened against hypothetical applications
+             that may erroneously set the JPEG destination buffer size to 0
+             while reusing the destination buffer pointer. */
+          if (alloc && (w > 1 || h > 1)) dstSize = 0;
           if (precision <= 8) {
             TRY_TJ(handle, tj3Compress8(handle, (unsigned char *)srcBuf, w, 0,
                                         h, TJPF_BGRX, &dstBuf, &dstSize));
@@ -800,9 +901,14 @@ static void bufSizeTest(void)
         }
 
         if (doYUV) {
+          /* Verify that tj3EncodeYUV*8() ignores TJPARAM_LOSSLESS and
+             TJPARAM_COLORSPACE. */
+          TRY_TJ(handle, tj3Set(handle, TJPARAM_LOSSLESS, 1));
+          TRY_TJ(handle, tj3Set(handle, TJPARAM_COLORSPACE, TJCS_RGB));
           TRY_TJ(handle, tj3EncodeYUV8(handle, (unsigned char *)srcBuf, h, 0,
                                        w, TJPF_BGRX, dstBuf, yuvAlign));
         } else {
+          if (alloc && (w > 1 || h > 1)) dstSize = 0;
           if (precision <= 8) {
             TRY_TJ(handle, tj3Compress8(handle, (unsigned char *)srcBuf, h, 0,
                                         w, TJPF_BGRX, &dstBuf, &dstSize));
@@ -888,15 +994,16 @@ static void initBitmap(void *buf, int width, int pitch, int height, int pf,
 }
 
 
-static void cmyk_to_rgb(int c, int m, int y, int k, int *r, int *g, int *b)
+static void cmyk_to_rgb(int c, int m, int y, int k, int *r, int *g, int *b,
+                        int targetMaxSample)
 {
-  *r = (int)((double)c * (double)k / (double)maxSample + 0.5);
-  *g = (int)((double)m * (double)k / (double)maxSample + 0.5);
-  *b = (int)((double)y * (double)k / (double)maxSample + 0.5);
+  *r = (int)((double)c * (double)k / (double)targetMaxSample + 0.5);
+  *g = (int)((double)m * (double)k / (double)targetMaxSample + 0.5);
+  *b = (int)((double)y * (double)k / (double)targetMaxSample + 0.5);
 }
 
 static int cmpBitmap(void *buf, int width, int pitch, int height, int pf,
-                     int bottomUp, int gray2rgb)
+                     int bottomUp, int gray2rgb, int targetPrecision)
 {
   int roffset = tjRedOffset[pf];
   int goffset = tjGreenOffset[pf];
@@ -904,6 +1011,7 @@ static int cmpBitmap(void *buf, int width, int pitch, int height, int pf,
   int aoffset = tjAlphaOffset[pf];
   int ps = tjPixelSize[pf];
   int i, j;
+  int targetMaxSample = (1 << targetPrecision) - 1;
 
   for (j = 0; j < height; j++) {
     int row = bottomUp ? height - j - 1 : j;
@@ -914,32 +1022,51 @@ static int cmpBitmap(void *buf, int width, int pitch, int height, int pf,
       int b = (j * (maxSample + 1) / height +
                i * (maxSample + 1) / width) % (maxSample + 1);
 
+      if (precision != targetPrecision) {
+        long halfMaxSample = maxSample / 2;
+
+        r = (int)((r * ((1 << targetPrecision) - 1) + halfMaxSample) /
+                  maxSample);
+        g = (int)((g * ((1 << targetPrecision) - 1) + halfMaxSample) /
+                  maxSample);
+        b = (int)((b * ((1 << targetPrecision) - 1) + halfMaxSample) /
+                  maxSample);
+      }
+
       if (pf == TJPF_GRAY) {
-        if (getVal(buf, row * pitch + i * ps) != b)
+        if (getVal(buf, row * pitch + i * ps, targetPrecision) != b)
           return 0;
       } else if (pf == TJPF_CMYK) {
         int rf, gf, bf;
 
-        cmyk_to_rgb(getVal(buf, row * pitch + i * ps + 0),
-                    getVal(buf, row * pitch + i * ps + 1),
-                    getVal(buf, row * pitch + i * ps + 2),
-                    getVal(buf, row * pitch + i * ps + 3), &rf, &gf, &bf);
+        cmyk_to_rgb(getVal(buf, row * pitch + i * ps + 0, targetPrecision),
+                    getVal(buf, row * pitch + i * ps + 1, targetPrecision),
+                    getVal(buf, row * pitch + i * ps + 2, targetPrecision),
+                    getVal(buf, row * pitch + i * ps + 3, targetPrecision),
+                    &rf, &gf, &bf, targetMaxSample);
         if (gray2rgb) {
           if (rf != b || gf != b || bf != b)
             return 0;
         } else if (rf != r || gf != g || bf != b) return 0;
       } else {
         if (gray2rgb) {
-          if (getVal(buf, row * pitch + i * ps + roffset) != b ||
-              getVal(buf, row * pitch + i * ps + goffset) != b ||
-              getVal(buf, row * pitch + i * ps + boffset) != b)
+          if (getVal(buf, row * pitch + i * ps + roffset,
+                     targetPrecision) != b ||
+              getVal(buf, row * pitch + i * ps + goffset,
+                     targetPrecision) != b ||
+              getVal(buf, row * pitch + i * ps + boffset,
+                     targetPrecision) != b)
             return 0;
-        } else if (getVal(buf, row * pitch + i * ps + roffset) != r ||
-                   getVal(buf, row * pitch + i * ps + goffset) != g ||
-                   getVal(buf, row * pitch + i * ps + boffset) != b)
+        } else if (getVal(buf, row * pitch + i * ps + roffset,
+                          targetPrecision) != r ||
+                   getVal(buf, row * pitch + i * ps + goffset,
+                          targetPrecision) != g ||
+                   getVal(buf, row * pitch + i * ps + boffset,
+                          targetPrecision) != b)
           return 0;
         if (aoffset >= 0 &&
-            getVal(buf, row * pitch + i * ps + aoffset) != maxSample)
+            getVal(buf, row * pitch + i * ps + aoffset,
+                   targetPrecision) != targetMaxSample)
           return 0;
       }
     }
@@ -977,16 +1104,18 @@ static int doBmpTest(const char *ext, int width, int align, int height, int pf,
     "00fc2803bca103ff75785ea0dca992aa", "d8c91fac522c16b029e514d331a22bc4",
     "e50cff0b3562ed7e64dbfc093440e333", "64f3320b226ea37fb58080713b4df1b2"
   };
+  int targetPrecision, maxTargetPrecision = 16;
 
   if ((handle = tj3Init(TJINIT_TRANSFORM)) == NULL)
     THROW_TJ(NULL);
   TRY_TJ(handle, tj3Set(handle, TJPARAM_BOTTOMUP, bottomUp));
   TRY_TJ(handle, tj3Set(handle, TJPARAM_PRECISION, precision));
 
-  if (precision == 8 && !strcasecmp(ext, "bmp"))
+  if (precision == 8 && !strcasecmp(ext, "bmp")) {
     md5ref = (pf == TJPF_GRAY ? "51976530acf75f02beddf5d21149101d" :
                                 "6d659071b9bfcdee2def22cb58ddadca");
-  else
+    maxTargetPrecision = 8;
+  } else
     md5ref = (pf == TJPF_GRAY ? grayPPMRefs[precision] :
                                 colorPPMRefs[precision]);
 
@@ -1006,6 +1135,7 @@ static int doBmpTest(const char *ext, int width, int align, int height, int pf,
     TRY_TJ(handle, tj3SaveImage16(handle, filename, (unsigned short *)buf,
                                   width, pitch, height, pf));
   }
+  tj3Free(buf);  buf = NULL;
   md5sum = MD5File(filename, md5buf);
   if (!md5sum) {
     printf("\n   Could not determine MD5 sum of %s\n", filename);
@@ -1014,36 +1144,16 @@ static int doBmpTest(const char *ext, int width, int align, int height, int pf,
   if (strcasecmp(md5sum, md5ref))
     THROW_MD5(filename, md5sum, md5ref);
 
-  tj3Free(buf);  buf = NULL;
-  if (precision <= 8) {
-    if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align, &loadHeight,
-                             &pf)) == NULL)
-      THROW_TJ(handle);
-  } else if (precision <= 12) {
-    if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align, &loadHeight,
-                              &pf)) == NULL)
-      THROW_TJ(handle);
-  } else {
-    if ((buf = tj3LoadImage16(handle, filename, &loadWidth, align, &loadHeight,
-                              &pf)) == NULL)
-      THROW_TJ(handle);
-  }
-  if (width != loadWidth || height != loadHeight) {
-    printf("\n   Image dimensions of %s are bogus\n", filename);
-    retval = -1;  goto bailout;
-  }
-  if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 0)) {
-    printf("\n   Pixel data in %s is bogus\n", filename);
-    retval = -1;  goto bailout;
-  }
-  if (pf == TJPF_GRAY) {
-    tj3Free(buf);  buf = NULL;
-    pf = TJPF_XBGR;
-    if (precision <= 8) {
+  for (targetPrecision = 2; targetPrecision <= maxTargetPrecision;
+       targetPrecision++) {
+    TRY_TJ(handle, tj3Set(handle, TJPARAM_PRECISION, targetPrecision));
+    pf = pixelFormat;
+
+    if (targetPrecision <= 8) {
       if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align,
                                &loadHeight, &pf)) == NULL)
         THROW_TJ(handle);
-    } else if (precision <= 12) {
+    } else if (targetPrecision <= 12) {
       if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align,
                                 &loadHeight, &pf)) == NULL)
         THROW_TJ(handle);
@@ -1052,59 +1162,94 @@ static int doBmpTest(const char *ext, int width, int align, int height, int pf,
                                 &loadHeight, &pf)) == NULL)
         THROW_TJ(handle);
     }
-    pitch = PAD(width * tjPixelSize[pf], align);
-    if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 1)) {
-      printf("\n   Converting %s to RGB failed\n", filename);
+    if (width != loadWidth || height != loadHeight) {
+      printf("\n   Image dimensions of %s are bogus\n", filename);
       retval = -1;  goto bailout;
+    }
+    pitch = PAD(width * tjPixelSize[pf], align);
+    if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 0,
+                   !strcasecmp(ext, "bmp") ? 8 : targetPrecision)) {
+      printf("\n   Pixel data in %s is bogus\n", filename);
+      printf("   (target data precision = %d)\n", targetPrecision);
+      retval = -1;  goto bailout;
+    }
+    tj3Free(buf);  buf = NULL;
+
+    if (pf == TJPF_GRAY) {
+      pf = TJPF_XBGR;
+      if (targetPrecision <= 8) {
+        if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align,
+                                 &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      } else if (targetPrecision <= 12) {
+        if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align,
+                                  &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      } else {
+        if ((buf = tj3LoadImage16(handle, filename, &loadWidth, align,
+                                  &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      }
+      pitch = PAD(width * tjPixelSize[pf], align);
+      if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 1,
+                     !strcasecmp(ext, "bmp") ? 8 : targetPrecision)) {
+        printf("\n   Converting %s to RGB failed\n", filename);
+        printf("   (target data precision = %d)\n", targetPrecision);
+        retval = -1;  goto bailout;
+      }
+      tj3Free(buf);  buf = NULL;
+
+      pf = TJPF_CMYK;
+      if (targetPrecision <= 8) {
+        if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align,
+                                 &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      } else if (targetPrecision <= 12) {
+        if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align,
+                                  &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      } else {
+        if ((buf = tj3LoadImage16(handle, filename, &loadWidth, align,
+                                  &loadHeight, &pf)) == NULL)
+          THROW_TJ(handle);
+      }
+      pitch = PAD(width * tjPixelSize[pf], align);
+      if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 1,
+                     !strcasecmp(ext, "bmp") ? 8 : targetPrecision)) {
+        printf("\n   Converting %s to CMYK failed\n", filename);
+        printf("   (target data precision = %d)\n", targetPrecision);
+        retval = -1;  goto bailout;
+      }
+      tj3Free(buf);  buf = NULL;
     }
 
-    tj3Free(buf);  buf = NULL;
-    pf = TJPF_CMYK;
-    if (precision <= 8) {
+    /* Verify that tj3LoadImage*() returns the proper "preferred" pixel format
+       for the file type. */
+    pf = pixelFormat;
+    pixelFormat = TJPF_UNKNOWN;
+    if (targetPrecision <= 8) {
       if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align,
-                               &loadHeight, &pf)) == NULL)
+                               &loadHeight, &pixelFormat)) == NULL)
         THROW_TJ(handle);
-    } else if (precision <= 12) {
+    } else if (targetPrecision <= 12) {
       if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align,
-                                &loadHeight, &pf)) == NULL)
+                                &loadHeight, &pixelFormat)) == NULL)
         THROW_TJ(handle);
     } else {
       if ((buf = tj3LoadImage16(handle, filename, &loadWidth, align,
-                                &loadHeight, &pf)) == NULL)
+                                &loadHeight, &pixelFormat)) == NULL)
         THROW_TJ(handle);
     }
-    pitch = PAD(width * tjPixelSize[pf], align);
-    if (!cmpBitmap(buf, width, pitch, height, pf, bottomUp, 1)) {
-      printf("\n   Converting %s to CMYK failed\n", filename);
-      retval = -1;  goto bailout;
+    tj3Free(buf);  buf = NULL;
+    if ((pf == TJPF_GRAY && pixelFormat != TJPF_GRAY) ||
+        (pf != TJPF_GRAY && !strcasecmp(ext, "bmp") &&
+         pixelFormat != TJPF_BGR) ||
+        (pf != TJPF_GRAY && !strcasecmp(ext, "ppm") &&
+         pixelFormat != TJPF_RGB)) {
+      printf("\n   tj3LoadImage8() returned unexpected pixel format: %s\n",
+             pixFormatStr[pixelFormat]);
+      retval = -1;
     }
-  }
-  /* Verify that tj3LoadImage*() returns the proper "preferred" pixel format
-     for the file type. */
-  tj3Free(buf);  buf = NULL;
-  pf = pixelFormat;
-  pixelFormat = TJPF_UNKNOWN;
-  if (precision <= 8) {
-    if ((buf = tj3LoadImage8(handle, filename, &loadWidth, align, &loadHeight,
-                             &pixelFormat)) == NULL)
-      THROW_TJ(handle);
-  } else if (precision <= 12) {
-    if ((buf = tj3LoadImage12(handle, filename, &loadWidth, align, &loadHeight,
-                              &pixelFormat)) == NULL)
-      THROW_TJ(handle);
-  } else {
-    if ((buf = tj3LoadImage16(handle, filename, &loadWidth, align, &loadHeight,
-                              &pixelFormat)) == NULL)
-      THROW_TJ(handle);
-  }
-  if ((pf == TJPF_GRAY && pixelFormat != TJPF_GRAY) ||
-      (pf != TJPF_GRAY && !strcasecmp(ext, "bmp") &&
-       pixelFormat != TJPF_BGR) ||
-      (pf != TJPF_GRAY && !strcasecmp(ext, "ppm") &&
-       pixelFormat != TJPF_RGB)) {
-    printf("\n   tj3LoadImage8() returned unexpected pixel format: %s\n",
-           pixFormatStr[pixelFormat]);
-    retval = -1;
   }
   unlink(filename);
 
@@ -1132,14 +1277,14 @@ static int bmpTest(void)
 
       printf("%s Top-Down PPM (row alignment = %d samples)  ...  ",
              pixFormatStr[format], align);
-      if (doBmpTest("ppm", width, align, height, format, 1) == -1)
+      if (doBmpTest("ppm", width, align, height, format, 0) == -1)
         return -1;
       printf("OK.\n");
 
       if (precision == 8) {
         printf("%s Bottom-Up BMP (row alignment = %d samples)  ...  ",
                pixFormatStr[format], align);
-        if (doBmpTest("bmp", width, align, height, format, 0) == -1)
+        if (doBmpTest("bmp", width, align, height, format, 1) == -1)
           return -1;
         printf("OK.\n");
       }

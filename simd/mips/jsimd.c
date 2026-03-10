@@ -1,6 +1,4 @@
 /*
- * jsimd_mips.c
- *
  * Copyright 2009 Pierre Ossman <ossman@cendio.se> for Cendio AB
  * Copyright (C) 2009-2011, 2014, 2016, 2018, 2020, 2022, 2024,
  *           D. R. Commander.
@@ -61,7 +59,7 @@ LOCAL(void)
 init_simd(void)
 {
 #ifndef NO_GETENV
-  char *env = NULL;
+  char env[2] = { 0 };
 #endif
 
   if (simd_support != ~0U)
@@ -80,11 +78,9 @@ init_simd(void)
 
 #ifndef NO_GETENV
   /* Force different settings through environment variables */
-  env = getenv("JSIMD_FORCEDSPR2");
-  if ((env != NULL) && (strcmp(env, "1") == 0))
+  if (!GETENV_S(env, 2, "JSIMD_FORCEDSPR2") && !strcmp(env, "1"))
     simd_support = JSIMD_DSPR2;
-  env = getenv("JSIMD_FORCENONE");
-  if ((env != NULL) && (strcmp(env, "1") == 0))
+  if (!GETENV_S(env, 2, "JSIMD_FORCENONE") && !strcmp(env, "1"))
     simd_support = 0;
 #endif
 }

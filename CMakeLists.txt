@@ -4,9 +4,18 @@ if(CMAKE_EXECUTABLE_SUFFIX)
   set(CMAKE_EXECUTABLE_SUFFIX_TMP ${CMAKE_EXECUTABLE_SUFFIX})
 endif()
 
+set(CMAKE_C_FLAGS_RELEASE_INITIALIZED_TO_DEFAULT 1)
+if(CMAKE_C_FLAGS_RELEASE)
+  set(CMAKE_C_FLAGS_RELEASE_INITIALIZED_TO_DEFAULT 0)
+endif()
+set(CMAKE_C_FLAGS_RELWITHDEBINFO_INITIALIZED_TO_DEFAULT 1)
+if(CMAKE_C_FLAGS_RELWITHDEBINFO)
+  set(CMAKE_C_FLAGS_RELWITHDEBINFO_INITIALIZED_TO_DEFAULT 0)
+endif()
+
 project(libjpeg-turbo C)
-set(VERSION 3.1.1)
-set(COPYRIGHT_YEAR "1991-2024")
+set(VERSION 3.1.4)
+set(COPYRIGHT_YEAR "1991-2026")
 string(REPLACE "." ";" VERSION_TRIPLET ${VERSION})
 list(GET VERSION_TRIPLET 0 VERSION_MAJOR)
 list(GET VERSION_TRIPLET 1 VERSION_MINOR)
@@ -240,7 +249,7 @@ if(CMAKE_C_COMPILER_ABI MATCHES "ELF X32")
   set(WITH_JAVA 0)
 else()
   option(WITH_JAVA
-    "Build Java wrapper for the TurboJPEG API library (implies ENABLE_SHARED=1)"
+    "Build TurboJPEG Java API and JNI wrapper for the TurboJPEG API library (implies ENABLE_SHARED=1 and WITH_TURBOJPEG=1)"
     FALSE)
   boolean_number(WITH_JAVA)
 endif()
@@ -252,11 +261,22 @@ option(WITH_JPEG8
   "Emulate libjpeg v8 API/ABI (this makes ${CMAKE_PROJECT_NAME} backward-incompatible with libjpeg v6b)"
   FALSE)
 boolean_number(WITH_JPEG8)
-option(WITH_SIMD "Include SIMD extensions, if available for this platform" TRUE)
+option(WITH_SIMD "Include SIMD extensions, if available for this platform"
+  TRUE)
 boolean_number(WITH_SIMD)
 option(WITH_TURBOJPEG
-  "Include the TurboJPEG API library and associated test programs" TRUE)
+  "Include the TurboJPEG API library and associated command-line tools/test programs"
+  TRUE)
 boolean_number(WITH_TURBOJPEG)
+option(WITH_TOOLS
+  "Build command-line tools (Disabling this disables WITH_TESTS)" TRUE)
+boolean_number(WITH_TOOLS)
+option(WITH_TESTS "Enable regression tests, and build associated test programs (WARNING: Disable this at your own risk. If a build is not validated with the regression tests, then it is the responsibility of the builder to ensure, via other means, that the build produces mathematically correct results.)"
+  TRUE)
+boolean_number(WITH_TESTS)
+if(NOT WITH_TOOLS)
+  set(WITH_TESTS 0)
+endif()
 option(WITH_FUZZ "Build fuzz targets" FALSE)
 
 macro(report_option var desc)
@@ -269,6 +289,7 @@ endmacro()
 
 if(WITH_JAVA)
   set(ENABLE_SHARED 1)
+  set(WITH_TURBOJPEG 1)
 endif()
 
 # Explicitly setting CMAKE_POSITION_INDEPENDENT_CODE=FALSE disables PIC for all
@@ -304,7 +325,9 @@ endif()
 report_option(WITH_ARITH_ENC "Arithmetic encoding support")
 
 report_option(WITH_TURBOJPEG "TurboJPEG API library")
-report_option(WITH_JAVA "TurboJPEG Java wrapper")
+report_option(WITH_JAVA "TurboJPEG Java API")
+report_option(WITH_TOOLS "Command-line tools")
+report_option(WITH_TESTS "Regression tests")
 
 if(NOT WITH_JPEG8)
   set(MEM_SRCDST_FUNCTIONS "global:  jpeg_mem_dest;  jpeg_mem_src;")
@@ -428,9 +451,11 @@ endif()
 
 if(CMAKE_COMPILER_IS_GNUCC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
   # Use the maximum optimization level for release builds
-  foreach(var CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_RELWITHDEBINFO)
-    if(${var} MATCHES "-O2")
-      string(REGEX REPLACE "-O2" "-O3" ${var} "${${var}}")
+  foreach(build_type RELEASE RELWITHDEBINFO)
+    if(CMAKE_C_FLAGS_${build_type} MATCHES "-O2" AND
+      CMAKE_C_FLAGS_${build_type}_INITIALIZED_TO_DEFAULT)
+      string(REGEX REPLACE "-O2" "-O3" CMAKE_C_FLAGS_${build_type}
+        "${CMAKE_C_FLAGS_${build_type}}")
     endif()
   endforeach()
 endif()
@@ -438,12 +463,16 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "SunOS")
   if(CMAKE_C_COMPILER_ID MATCHES "SunPro")
     # Use the maximum optimization level for release builds
-    foreach(var CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_RELWITHDEBINFO)
-      if(${var} MATCHES "-xO3")
-        string(REGEX REPLACE "-xO3" "-xO5" ${var} "${${var}}")
+    foreach(build_type RELEASE RELWITHDEBINFO)
+      if(CMAKE_C_FLAGS_${build_type} MATCHES "-xO3" AND
+        CMAKE_C_FLAGS_${build_type}_INITIALIZED_TO_DEFAULT)
+        string(REGEX REPLACE "-xO3" "-xO5" CMAKE_C_FLAGS_${build_type}
+          "${CMAKE_C_FLAGS_${build_type}}")
       endif()
-      if(${var} MATCHES "-xO2")
-        string(REGEX REPLACE "-xO2" "-xO5" ${var} "${${var}}")
+      if(CMAKE_C_FLAGS_${build_type} MATCHES "-xO2" AND
+        CMAKE_C_FLAGS_${build_type}_INITIALIZED_TO_DEFAULT)
+        string(REGEX REPLACE "-xO2" "-xO5" CMAKE_C_FLAGS_${build_type}
+          "${CMAKE_C_FLAGS_${build_type}}")
       endif()
     endforeach()
   endif()
@@ -497,7 +526,7 @@ if(UNIX)
   endif()
 endif()
 
-if(NOT MSVC OR CMAKE_C_COMPILER_ID MATCHES "Clang")
+if(NOT WIN32)
   check_c_source_compiles("extern const int table[1]; const int __attribute__((visibility(\"hidden\"))) table[1] = { 0 }; int main(void) { return table[0]; }"
     HIDDEN_WORKS)
   if(HIDDEN_WORKS)
@@ -589,8 +618,7 @@ if(UNIX)
 endif()
 
 # Include directories and compiler definitions
-include_directories(${CMAKE_CURRENT_BINARY_DIR}
-  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+include_directories(${CMAKE_CURRENT_BINARY_DIR})
 
 
 ###############################################################################
@@ -602,20 +630,48 @@ if(CMAKE_EXECUTABLE_SUFFIX_TMP)
 endif()
 message(STATUS "CMAKE_EXECUTABLE_SUFFIX = ${CMAKE_EXECUTABLE_SUFFIX}")
 
-set(JPEG16_SOURCES src/jcapistd.c src/jccolor.c src/jcdiffct.c src/jclossls.c
-  src/jcmainct.c src/jcprepct.c src/jcsample.c src/jdapistd.c src/jdcolor.c
-  src/jddiffct.c src/jdlossls.c src/jdmainct.c src/jdpostct.c src/jdsample.c
-  src/jutils.c)
-set(JPEG12_SOURCES ${JPEG16_SOURCES} src/jccoefct.c src/jcdctmgr.c
-  src/jdcoefct.c src/jddctmgr.c src/jdmerge.c src/jfdctfst.c src/jfdctint.c
-  src/jidctflt.c src/jidctfst.c src/jidctint.c src/jidctred.c src/jquant1.c
-  src/jquant2.c)
-set(JPEG_SOURCES ${JPEG12_SOURCES} src/jcapimin.c src/jchuff.c src/jcicc.c
-  src/jcinit.c src/jclhuff.c src/jcmarker.c src/jcmaster.c src/jcomapi.c
-  src/jcparam.c src/jcphuff.c src/jctrans.c src/jdapimin.c src/jdatadst.c
-  src/jdatasrc.c src/jdhuff.c src/jdicc.c src/jdinput.c src/jdlhuff.c
-  src/jdmarker.c src/jdmaster.c src/jdphuff.c src/jdtrans.c src/jerror.c
-  src/jfdctflt.c src/jmemmgr.c src/jmemnobs.c src/jpeg_nbits.c)
+add_custom_target(wrappers COMMAND ${CMAKE_COMMAND}
+ -DSOURCE_DIR=${CMAKE_SOURCE_DIR}/src/wrapper
+ -P ${CMAKE_CURRENT_SOURCE_DIR}/cmakescripts/GenerateWrappers.cmake)
+
+set(JPEG_SOURCES src/jcapimin.c
+  src/wrapper/jcapistd-8.c src/wrapper/jcapistd-12.c src/wrapper/jcapistd-16.c
+  src/wrapper/jccoefct-8.c src/wrapper/jccoefct-12.c
+  src/wrapper/jccolor-8.c src/wrapper/jccolor-12.c src/wrapper/jccolor-16.c
+  src/wrapper/jcdctmgr-8.c src/wrapper/jcdctmgr-12.c
+  src/wrapper/jcdiffct-8.c src/wrapper/jcdiffct-12.c src/wrapper/jcdiffct-16.c
+  src/jchuff.c src/jcicc.c src/jcinit.c src/jclhuff.c
+  src/wrapper/jclossls-8.c src/wrapper/jclossls-12.c src/wrapper/jclossls-16.c
+  src/wrapper/jcmainct-8.c src/wrapper/jcmainct-12.c src/wrapper/jcmainct-16.c
+  src/jcmarker.c src/jcmaster.c src/jcomapi.c src/jcparam.c src/jcphuff.c
+  src/wrapper/jcprepct-8.c src/wrapper/jcprepct-12.c src/wrapper/jcprepct-16.c
+  src/wrapper/jcsample-8.c src/wrapper/jcsample-12.c src/wrapper/jcsample-16.c
+  src/jctrans.c src/jdapimin.c
+  src/wrapper/jdapistd-8.c src/wrapper/jdapistd-12.c src/wrapper/jdapistd-16.c
+  src/jdatadst.c src/jdatasrc.c
+  src/wrapper/jdcoefct-8.c src/wrapper/jdcoefct-12.c
+  src/wrapper/jdcolor-8.c src/wrapper/jdcolor-12.c src/wrapper/jdcolor-16.c
+  src/wrapper/jddctmgr-8.c src/wrapper/jddctmgr-12.c
+  src/wrapper/jddiffct-8.c src/wrapper/jddiffct-12.c src/wrapper/jddiffct-16.c
+  src/jdhuff.c src/jdicc.c src/jdinput.c src/jdlhuff.c
+  src/wrapper/jdlossls-8.c src/wrapper/jdlossls-12.c src/wrapper/jdlossls-16.c
+  src/wrapper/jdmainct-8.c src/wrapper/jdmainct-12.c src/wrapper/jdmainct-16.c
+  src/jdmarker.c src/jdmaster.c
+  src/wrapper/jdmerge-8.c src/wrapper/jdmerge-12.c
+  src/jdphuff.c
+  src/wrapper/jdpostct-8.c src/wrapper/jdpostct-12.c src/wrapper/jdpostct-16.c
+  src/wrapper/jdsample-8.c src/wrapper/jdsample-12.c src/wrapper/jdsample-16.c
+  src/jdtrans.c src/jerror.c src/jfdctflt.c
+  src/wrapper/jfdctfst-8.c src/wrapper/jfdctfst-12.c
+  src/wrapper/jfdctint-8.c src/wrapper/jfdctint-12.c
+  src/wrapper/jidctflt-8.c src/wrapper/jidctflt-12.c
+  src/wrapper/jidctfst-8.c src/wrapper/jidctfst-12.c
+  src/wrapper/jidctint-8.c src/wrapper/jidctint-12.c
+  src/wrapper/jidctred-8.c src/wrapper/jidctred-12.c
+  src/jmemmgr.c src/jmemnobs.c src/jpeg_nbits.c
+  src/wrapper/jquant1-8.c src/wrapper/jquant1-12.c
+  src/wrapper/jquant2-8.c src/wrapper/jquant2-12.c
+  src/wrapper/jutils-8.c src/wrapper/jutils-12.c src/wrapper/jutils-16.c)
 
 if(WITH_ARITH_ENC OR WITH_ARITH_DEC)
   set(JPEG_SOURCES ${JPEG_SOURCES} src/jaricom.c)
@@ -656,40 +712,25 @@ if(WITH_JAVA)
 endif()
 
 if(ENABLE_SHARED)
-  # Compile a separate version of these source files with 12-bit and 16-bit
-  # data precision.
-  add_library(jpeg12 OBJECT ${JPEG12_SOURCES})
-  set_property(TARGET jpeg12 PROPERTY COMPILE_FLAGS "-DBITS_IN_JSAMPLE=12")
-  set_target_properties(jpeg12 PROPERTIES POSITION_INDEPENDENT_CODE 1)
-  add_library(jpeg16 OBJECT ${JPEG16_SOURCES})
-  set_property(TARGET jpeg16 PROPERTY COMPILE_FLAGS "-DBITS_IN_JSAMPLE=16")
-  set_target_properties(jpeg16 PROPERTIES POSITION_INDEPENDENT_CODE 1)
   add_subdirectory(sharedlib)
 endif()
 
 if(ENABLE_STATIC)
-  # Compile a separate version of these source files with 12-bit and 16-bit
-  # data precision.
-  add_library(jpeg12-static OBJECT ${JPEG12_SOURCES})
-  set_property(TARGET jpeg12-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=12")
-  add_library(jpeg16-static OBJECT ${JPEG16_SOURCES})
-  set_property(TARGET jpeg16-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=16")
   add_library(jpeg-static STATIC ${JPEG_SOURCES} ${SIMD_TARGET_OBJECTS}
-    ${SIMD_OBJS} $<TARGET_OBJECTS:jpeg12-static>
-    $<TARGET_OBJECTS:jpeg16-static>)
+    ${SIMD_OBJS})
   if(NOT MSVC_LIKE)
     set_target_properties(jpeg-static PROPERTIES OUTPUT_NAME jpeg)
   endif()
 endif()
 
 if(WITH_TURBOJPEG)
+  set(TURBOJPEG_SOURCES ${JPEG_SOURCES} ${SIMD_TARGET_OBJECTS} ${SIMD_OBJS}
+    src/turbojpeg.c src/transupp.c src/jdatadst-tj.c src/jdatasrc-tj.c
+    src/rdbmp.c
+    src/wrapper/rdppm-8.c src/wrapper/rdppm-12.c src/wrapper/rdppm-16.c
+    src/wrbmp.c
+    src/wrapper/wrppm-8.c src/wrapper/wrppm-12.c src/wrapper/wrppm-16.c)
   if(ENABLE_SHARED)
-    set(TURBOJPEG_SOURCES ${JPEG_SOURCES} ${SIMD_TARGET_OBJECTS} ${SIMD_OBJS}
-      src/turbojpeg.c src/transupp.c src/jdatadst-tj.c src/jdatasrc-tj.c
-      src/rdbmp.c src/rdppm.c src/wrbmp.c src/wrppm.c $<TARGET_OBJECTS:jpeg12>
-      $<TARGET_OBJECTS:jpeg16>)
     set(TJMAPFILE ${CMAKE_CURRENT_SOURCE_DIR}/src/turbojpeg-mapfile)
     if(WITH_JAVA)
       set(TURBOJPEG_SOURCES ${TURBOJPEG_SOURCES} java/turbojpeg-jni.c)
@@ -702,16 +743,7 @@ if(WITH_TURBOJPEG)
       set(TURBOJPEG_SOURCES ${TURBOJPEG_SOURCES}
         ${CMAKE_BINARY_DIR}/win/turbojpeg.rc)
     endif()
-    add_library(turbojpeg12 OBJECT src/rdppm.c src/wrppm.c)
-    set_property(TARGET turbojpeg12 PROPERTY COMPILE_FLAGS
-      "-DBITS_IN_JSAMPLE=12 -DPPM_SUPPORTED")
-    set_target_properties(turbojpeg12 PROPERTIES POSITION_INDEPENDENT_CODE 1)
-    add_library(turbojpeg16 OBJECT src/rdppm.c src/wrppm.c)
-    set_property(TARGET turbojpeg16 PROPERTY COMPILE_FLAGS
-      "-DBITS_IN_JSAMPLE=16 -DPPM_SUPPORTED")
-    set_target_properties(turbojpeg16 PROPERTIES POSITION_INDEPENDENT_CODE 1)
-    add_library(turbojpeg SHARED ${TURBOJPEG_SOURCES}
-      $<TARGET_OBJECTS:turbojpeg12> $<TARGET_OBJECTS:turbojpeg16>)
+    add_library(turbojpeg SHARED ${TURBOJPEG_SOURCES})
     set_property(TARGET turbojpeg PROPERTY COMPILE_FLAGS
       "-DBMP_SUPPORTED -DPPM_SUPPORTED")
     if(WIN32)
@@ -734,109 +766,103 @@ if(WITH_TURBOJPEG)
         LINK_FLAGS "${TJMAPFLAG}${TJMAPFILE}")
     endif()
 
-    add_executable(tjunittest src/tjunittest.c src/tjutil.c src/md5/md5.c
-      src/md5/md5hl.c)
-    target_link_libraries(tjunittest turbojpeg)
+    if(WITH_TESTS)
+      add_executable(tjunittest src/tjunittest.c src/tjutil.c src/md5/md5.c
+        src/md5/md5hl.c)
+      target_link_libraries(tjunittest turbojpeg)
 
-    add_executable(tjbench src/tjbench.c src/tjutil.c)
-    target_link_libraries(tjbench turbojpeg)
-    if(UNIX)
-      target_link_libraries(tjbench m)
+      add_executable(tjcomp src/tjcomp.c)
+      target_link_libraries(tjcomp turbojpeg)
+
+      add_executable(tjdecomp src/tjdecomp.c)
+      target_link_libraries(tjdecomp turbojpeg)
+
+      add_executable(tjtran src/tjtran.c)
+      target_link_libraries(tjtran turbojpeg)
     endif()
 
-    add_executable(tjcomp src/tjcomp.c)
-    target_link_libraries(tjcomp turbojpeg)
-
-    add_executable(tjdecomp src/tjdecomp.c)
-    target_link_libraries(tjdecomp turbojpeg)
-
-    add_executable(tjtran src/tjtran.c)
-    target_link_libraries(tjtran turbojpeg)
+    if(WITH_TOOLS)
+      add_executable(tjbench src/tjbench.c src/tjutil.c)
+      target_link_libraries(tjbench turbojpeg)
+      if(UNIX)
+        target_link_libraries(tjbench m)
+      endif()
+    endif()
 
     add_custom_target(tjdoc COMMAND doxygen -s ../doc/doxygen.config
       WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/src)
   endif()
 
   if(ENABLE_STATIC)
-    add_library(turbojpeg12-static OBJECT src/rdppm.c src/wrppm.c)
-    set_property(TARGET turbojpeg12-static PROPERTY COMPILE_FLAGS
-      "-DBITS_IN_JSAMPLE=12 -DPPM_SUPPORTED")
-    add_library(turbojpeg16-static OBJECT src/rdppm.c src/wrppm.c)
-    set_property(TARGET turbojpeg16-static PROPERTY COMPILE_FLAGS
-      "-DBITS_IN_JSAMPLE=16 -DPPM_SUPPORTED")
-    add_library(turbojpeg-static STATIC ${JPEG_SOURCES} ${SIMD_TARGET_OBJECTS}
-      ${SIMD_OBJS} src/turbojpeg.c src/transupp.c src/jdatadst-tj.c
-      src/jdatasrc-tj.c src/rdbmp.c src/rdppm.c src/wrbmp.c src/wrppm.c
-      $<TARGET_OBJECTS:jpeg12-static> $<TARGET_OBJECTS:jpeg16-static>
-      $<TARGET_OBJECTS:turbojpeg12-static>
-      $<TARGET_OBJECTS:turbojpeg16-static>)
+    add_library(turbojpeg-static STATIC ${TURBOJPEG_SOURCES})
     set_property(TARGET turbojpeg-static PROPERTY COMPILE_FLAGS
       "-DBMP_SUPPORTED -DPPM_SUPPORTED")
     if(NOT MSVC_LIKE)
       set_target_properties(turbojpeg-static PROPERTIES OUTPUT_NAME turbojpeg)
     endif()
 
-    add_executable(tjunittest-static src/tjunittest.c src/tjutil.c
-      src/md5/md5.c src/md5/md5hl.c)
-    target_link_libraries(tjunittest-static turbojpeg-static)
+    if(WITH_TESTS)
+      add_executable(tjunittest-static src/tjunittest.c src/tjutil.c
+        src/md5/md5.c src/md5/md5hl.c)
+      target_link_libraries(tjunittest-static turbojpeg-static)
+    endif()
 
-    add_executable(tjbench-static src/tjbench.c src/tjutil.c)
-    target_link_libraries(tjbench-static turbojpeg-static)
-    if(UNIX)
-      target_link_libraries(tjbench-static m)
+    if(WITH_TOOLS)
+      add_executable(tjbench-static src/tjbench.c src/tjutil.c)
+      target_link_libraries(tjbench-static turbojpeg-static)
+      if(UNIX)
+        target_link_libraries(tjbench-static m)
+      endif()
     endif()
   endif()
 endif()
 
-if(WIN32)
-  set(USE_SETMODE "-DUSE_SETMODE")
+if(WITH_TOOLS)
+  if(WIN32)
+    set(USE_SETMODE "-DUSE_SETMODE")
+  endif()
+  set(CDJPEG_COMPILE_FLAGS
+    "-DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED ${USE_SETMODE}")
 endif()
-set(CDJPEG_COMPILE_FLAGS
-  "-DBMP_SUPPORTED -DGIF_SUPPORTED -DPPM_SUPPORTED -DTARGA_SUPPORTED ${USE_SETMODE}")
 
 if(ENABLE_STATIC)
-  # Compile a separate version of these source files with 12-bit and 16-bit
-  # data precision.
-  add_library(cjpeg12-static OBJECT src/rdppm.c)
-  set_property(TARGET cjpeg12-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=12 -DGIF_SUPPORTED -DPPM_SUPPORTED")
-  add_library(cjpeg16-static OBJECT src/rdppm.c)
-  set_property(TARGET cjpeg16-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=16 -DGIF_SUPPORTED -DPPM_SUPPORTED")
-  add_executable(cjpeg-static src/cjpeg.c src/cdjpeg.c src/rdbmp.c src/rdgif.c
-    src/rdppm.c src/rdswitch.c src/rdtarga.c $<TARGET_OBJECTS:cjpeg12-static>
-    $<TARGET_OBJECTS:cjpeg16-static>)
-  set_property(TARGET cjpeg-static PROPERTY COMPILE_FLAGS
-    ${CDJPEG_COMPILE_FLAGS})
-  target_link_libraries(cjpeg-static jpeg-static)
+  if(WITH_TOOLS)
+    add_executable(cjpeg-static src/cjpeg.c src/cdjpeg.c src/rdbmp.c
+      src/rdgif.c
+      src/wrapper/rdppm-8.c src/wrapper/rdppm-12.c src/wrapper/rdppm-16.c
+      src/rdswitch.c src/rdtarga.c)
+    set_property(TARGET cjpeg-static PROPERTY COMPILE_FLAGS
+      ${CDJPEG_COMPILE_FLAGS})
+    target_link_libraries(cjpeg-static jpeg-static)
 
-  # Compile a separate version of these source files with 12-bit and 16-bit
-  # data precision.
-  add_library(djpeg12-static OBJECT src/rdcolmap.c src/wrgif.c src/wrppm.c)
-  set_property(TARGET djpeg12-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=12 -DGIF_SUPPORTED -DPPM_SUPPORTED")
-  add_library(djpeg16-static OBJECT src/wrppm.c)
-  set_property(TARGET djpeg16-static PROPERTY COMPILE_FLAGS
-    "-DBITS_IN_JSAMPLE=16 -DPPM_SUPPORTED")
-  add_executable(djpeg-static src/djpeg.c src/cdjpeg.c src/rdcolmap.c
-    src/rdswitch.c src/wrbmp.c src/wrgif.c src/wrppm.c src/wrtarga.c
-    $<TARGET_OBJECTS:djpeg12-static> $<TARGET_OBJECTS:djpeg16-static>)
-  set_property(TARGET djpeg-static PROPERTY COMPILE_FLAGS
-    ${CDJPEG_COMPILE_FLAGS})
-  target_link_libraries(djpeg-static jpeg-static)
+    add_executable(djpeg-static src/djpeg.c src/cdjpeg.c
+      src/wrapper/rdcolmap-8.c src/wrapper/rdcolmap-12.c
+      src/rdswitch.c src/wrbmp.c
+      src/wrapper/wrgif-8.c src/wrapper/wrgif-12.c
+      src/wrapper/wrppm-8.c src/wrapper/wrppm-12.c src/wrapper/wrppm-16.c
+      src/wrtarga.c)
+    set_property(TARGET djpeg-static PROPERTY COMPILE_FLAGS
+      ${CDJPEG_COMPILE_FLAGS})
+    target_link_libraries(djpeg-static jpeg-static)
 
-  add_executable(jpegtran-static src/jpegtran.c src/cdjpeg.c src/rdswitch.c
-    src/transupp.c)
-  target_link_libraries(jpegtran-static jpeg-static)
-  set_property(TARGET jpegtran-static PROPERTY COMPILE_FLAGS "${USE_SETMODE}")
+    add_executable(jpegtran-static src/jpegtran.c src/cdjpeg.c src/rdswitch.c
+      src/transupp.c)
+    target_link_libraries(jpegtran-static jpeg-static)
+    set_property(TARGET jpegtran-static PROPERTY COMPILE_FLAGS
+      "${USE_SETMODE}")
+  endif()
 
-  add_executable(example-static src/example.c)
-  target_link_libraries(example-static jpeg-static)
+  if(WITH_TESTS)
+    add_executable(example-static src/example.c)
+    target_link_libraries(example-static jpeg-static)
+  endif()
 endif()
 
-add_executable(rdjpgcom src/rdjpgcom.c)
+if(WITH_TOOLS)
+  add_executable(rdjpgcom src/rdjpgcom.c)
 
-add_executable(wrjpgcom src/wrjpgcom.c)
+  add_executable(wrjpgcom src/wrjpgcom.c)
+endif()
 
 
 ###############################################################################
@@ -844,8 +870,11 @@ add_executable(wrjpgcom src/wrjpgcom.c)
 ###############################################################################
 
 if(WITH_FUZZ)
+  add_definitions(-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION)
   add_subdirectory(fuzz)
 endif()
+
+if(WITH_TESTS)
 
 add_executable(strtest src/strtest.c)
 
@@ -860,158 +889,56 @@ endif()
 enable_testing()
 
 if(WITH_JAVA)
-  add_test(TJUnitTest
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest)
-  add_test(TJUnitTest-yuv
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-yuv
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -yuv)
-  add_test(TJUnitTest-yuv-nopad
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-yuv-nopad
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -yuv -noyuvpad)
-  add_test(TJUnitTest-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-lossless
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -lossless)
-  add_test(TJUnitTest-bi
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-bi
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -bi)
-  add_test(TJUnitTest-bi-yuv
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-bi-yuv
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -bi -yuv)
-  add_test(TJUnitTest-bi-yuv-nopad
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-bi-yuv-nopad
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -bi -yuv -noyuvpad)
-  add_test(TJUnitTest-bi-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-bi-lossless
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -bi -lossless)
-  add_test(TJUnitTest-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest-bmp
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -bmp)
-  add_test(TJUnitTest12
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+  add_test(NAME TJUnitTest12
+    COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
       -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
       TJUnitTest -precision 12)
-  add_test(TJUnitTest12-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 12 -lossless)
-  add_test(TJUnitTest12-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 12 -bmp)
-  add_test(TJUnitTest2-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 2)
-  add_test(TJUnitTest2-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 2 -bmp)
-  add_test(TJUnitTest3-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 3)
-  add_test(TJUnitTest3-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 3 -bmp)
-  add_test(TJUnitTest4-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 4)
-  add_test(TJUnitTest4-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 4 -bmp)
-  add_test(TJUnitTest5-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 5)
-  add_test(TJUnitTest5-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 5 -bmp)
-  add_test(TJUnitTest6-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 6)
-  add_test(TJUnitTest6-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 6 -bmp)
-  add_test(TJUnitTest7-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 7)
-  add_test(TJUnitTest7-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 7 -bmp)
-  add_test(TJUnitTest9-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 9)
-  add_test(TJUnitTest9-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 9 -bmp)
-  add_test(TJUnitTest10-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 10)
-  add_test(TJUnitTest10-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 10 -bmp)
-  add_test(TJUnitTest11-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 11)
-  add_test(TJUnitTest11-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 11 -bmp)
-  add_test(TJUnitTest13-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 13)
-  add_test(TJUnitTest13-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 13 -bmp)
-  add_test(TJUnitTest14-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 14)
-  add_test(TJUnitTest14-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 14 -bmp)
-  add_test(TJUnitTest15-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 15)
-  add_test(TJUnitTest15-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 15 -bmp)
-  add_test(TJUnitTest16-lossless
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 16)
-  add_test(TJUnitTest16-bmp
-    ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
-      -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
-      TJUnitTest -precision 16 -bmp)
+  foreach(sample_bits 2 3 4 5 6 7 9 10 11 12 13 14 15 16)
+    add_test(NAME TJUnitTest${sample_bits}-lossless
+      COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+        -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
+        TJUnitTest -precision ${sample_bits} -lossless)
+    add_test(NAME TJUnitTest${sample_bits}-bmp
+      COMMAND ${Java_JAVA_EXECUTABLE} ${JAVAARGS} -cp java/turbojpeg.jar
+        -Djava.library.path=${CMAKE_CURRENT_BINARY_DIR}/${OBJDIR}
+        TJUnitTest -precision ${sample_bits} -bmp)
+  endforeach()
 endif()
 
 set(TEST_LIBTYPES "")
@@ -1169,90 +1096,14 @@ foreach(libtype ${TEST_LIBTYPES})
       COMMAND tjunittest${suffix} -precision 12)
     add_test(NAME tjunittest12-${libtype}-alloc
       COMMAND tjunittest${suffix} -precision 12 -alloc)
-    add_test(NAME tjunittest12-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 12 -lossless)
-    add_test(NAME tjunittest12-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 12 -lossless -alloc)
-    add_test(NAME tjunittest12-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 12 -bmp)
-    add_test(NAME tjunittest2-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 2)
-    add_test(NAME tjunittest2-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 2 -alloc)
-    add_test(NAME tjunittest2-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 2 -bmp)
-    add_test(NAME tjunittest3-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 3)
-    add_test(NAME tjunittest3-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 3 -alloc)
-    add_test(NAME tjunittest3-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 3 -bmp)
-    add_test(NAME tjunittest4-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 4)
-    add_test(NAME tjunittest4-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 4 -alloc)
-    add_test(NAME tjunittest4-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 4 -bmp)
-    add_test(NAME tjunittest5-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 5)
-    add_test(NAME tjunittest5-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 5 -alloc)
-    add_test(NAME tjunittest5-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 5 -bmp)
-    add_test(NAME tjunittest6-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 6)
-    add_test(NAME tjunittest6-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 6 -alloc)
-    add_test(NAME tjunittest6-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 6 -bmp)
-    add_test(NAME tjunittest7-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 7)
-    add_test(NAME tjunittest7-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 7 -alloc)
-    add_test(NAME tjunittest7-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 7 -bmp)
-    add_test(NAME tjunittest9-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 9)
-    add_test(NAME tjunittest9-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 9 -alloc)
-    add_test(NAME tjunittest9-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 9 -bmp)
-    add_test(NAME tjunittest10-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 10)
-    add_test(NAME tjunittest10-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 10 -alloc)
-    add_test(NAME tjunittest10-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 10 -bmp)
-    add_test(NAME tjunittest11-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 11)
-    add_test(NAME tjunittest11-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 11 -alloc)
-    add_test(NAME tjunittest11-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 11 -bmp)
-    add_test(NAME tjunittest13-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 13)
-    add_test(NAME tjunittest13-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 13 -alloc)
-    add_test(NAME tjunittest13-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 13 -bmp)
-    add_test(NAME tjunittest14-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 14)
-    add_test(NAME tjunittest14-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 14 -alloc)
-    add_test(NAME tjunittest14-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 14 -bmp)
-    add_test(NAME tjunittest15-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 15)
-    add_test(NAME tjunittest15-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 15 -alloc)
-    add_test(NAME tjunittest15-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 15 -bmp)
-    add_test(NAME tjunittest16-${libtype}-lossless
-      COMMAND tjunittest${suffix} -precision 16)
-    add_test(NAME tjunittest16-${libtype}-lossless-alloc
-      COMMAND tjunittest${suffix} -precision 16 -alloc)
-    add_test(NAME tjunittest16-${libtype}-bmp
-      COMMAND tjunittest${suffix} -precision 16 -bmp)
+    foreach(sample_bits 2 3 4 5 6 7 9 10 11 12 13 14 15 16)
+      add_test(NAME tjunittest${sample_bits}-${libtype}-lossless
+        COMMAND tjunittest${suffix} -precision ${sample_bits} -lossless)
+      add_test(NAME tjunittest${sample_bits}-${libtype}-lossless-alloc
+        COMMAND tjunittest${suffix} -precision ${sample_bits} -lossless -alloc)
+      add_test(NAME tjunittest${sample_bits}-${libtype}-bmp
+        COMMAND tjunittest${suffix} -precision ${sample_bits} -bmp)
+    endforeach()
 
     foreach(sample_bits 8 12)
 
@@ -1958,6 +1809,8 @@ if(WITH_TURBOJPEG)
       ${CMAKE_CURRENT_BINARY_DIR}/test/tjtrantest)
 endif()
 
+endif() # WITH_TESTS
+
 
 ###############################################################################
 # INSTALLATION
@@ -1968,106 +1821,123 @@ set(EXE ${CMAKE_EXECUTABLE_SUFFIX})
 if(WITH_TURBOJPEG)
   if(ENABLE_SHARED)
     install(TARGETS turbojpeg EXPORT ${CMAKE_PROJECT_NAME}Targets
-      INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT lib
-      LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT lib
-      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin)
-    install(TARGETS tjbench
-      RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin)
+      INCLUDES DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT lib
+      LIBRARY DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT lib
+      RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin)
+    if(WITH_TOOLS)
+      install(TARGETS tjbench
+        RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin)
+    endif()
     if(NOT CMAKE_VERSION VERSION_LESS "3.1" AND MSVC_LIKE AND
       CMAKE_C_LINKER_SUPPORTS_PDB)
       install(FILES "$<TARGET_PDB_FILE:turbojpeg>"
-        DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin OPTIONAL)
+        DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin OPTIONAL)
     endif()
   endif()
   if(ENABLE_STATIC)
     install(TARGETS turbojpeg-static EXPORT ${CMAKE_PROJECT_NAME}Targets
-      INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-      ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT lib)
+      INCLUDES DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+      ARCHIVE DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT lib)
     if(NOT ENABLE_SHARED)
       if(GENERATOR_IS_MULTI_CONFIG)
         set(DIR "${CMAKE_CURRENT_BINARY_DIR}/\${CMAKE_INSTALL_CONFIG_NAME}")
       else()
         set(DIR ${CMAKE_CURRENT_BINARY_DIR})
       endif()
-      install(PROGRAMS ${DIR}/tjbench-static${EXE}
-        DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin RENAME tjbench${EXE})
+      if(WITH_TOOLS)
+        install(PROGRAMS ${DIR}/tjbench-static${EXE}
+          DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin
+          RENAME tjbench${EXE})
+      endif()
     endif()
   endif()
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/turbojpeg.h
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT include)
+    DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR} COMPONENT include)
 endif()
 
 if(ENABLE_STATIC)
   install(TARGETS jpeg-static EXPORT ${CMAKE_PROJECT_NAME}Targets
-    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR} COMPONENT lib)
+    INCLUDES DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR} COMPONENT lib)
   if(NOT ENABLE_SHARED)
     if(GENERATOR_IS_MULTI_CONFIG)
       set(DIR "${CMAKE_CURRENT_BINARY_DIR}/\${CMAKE_INSTALL_CONFIG_NAME}")
     else()
       set(DIR ${CMAKE_CURRENT_BINARY_DIR})
     endif()
-    install(PROGRAMS ${DIR}/cjpeg-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin RENAME cjpeg${EXE})
-    install(PROGRAMS ${DIR}/djpeg-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin RENAME djpeg${EXE})
-    install(PROGRAMS ${DIR}/jpegtran-static${EXE}
-      DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin RENAME jpegtran${EXE})
+    if(WITH_TOOLS)
+      install(PROGRAMS ${DIR}/cjpeg-static${EXE}
+        DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin
+        RENAME cjpeg${EXE})
+      install(PROGRAMS ${DIR}/djpeg-static${EXE}
+        DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin
+        RENAME djpeg${EXE})
+      install(PROGRAMS ${DIR}/jpegtran-static${EXE}
+        DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin
+        RENAME jpegtran${EXE})
+    endif()
   endif()
 endif()
 
-install(TARGETS rdjpgcom wrjpgcom
-  RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT bin)
+if(WITH_TOOLS)
+  install(TARGETS rdjpgcom wrjpgcom
+    RUNTIME DESTINATION ${CMAKE_INSTALL_FULL_BINDIR} COMPONENT bin)
+endif()
 
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/README.ijg
   ${CMAKE_CURRENT_SOURCE_DIR}/README.md
   ${CMAKE_CURRENT_SOURCE_DIR}/src/example.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/tjcomp.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/tjdecomp.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/tjtran.c
   ${CMAKE_CURRENT_SOURCE_DIR}/doc/libjpeg.txt
   ${CMAKE_CURRENT_SOURCE_DIR}/doc/structure.txt
   ${CMAKE_CURRENT_SOURCE_DIR}/doc/usage.txt
   ${CMAKE_CURRENT_SOURCE_DIR}/doc/wizard.txt
-  ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md DESTINATION ${CMAKE_INSTALL_DOCDIR}
-  COMPONENT doc)
+  ${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.md
+  DESTINATION ${CMAKE_INSTALL_FULL_DOCDIR} COMPONENT doc)
+if(WITH_TURBOJPEG)
+  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/src/tjcomp.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tjdecomp.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/tjtran.c
+    DESTINATION ${CMAKE_INSTALL_FULL_DOCDIR} COMPONENT doc)
+endif()
 if(WITH_JAVA)
   install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/java/TJComp.java
     ${CMAKE_CURRENT_SOURCE_DIR}/java/TJDecomp.java
     ${CMAKE_CURRENT_SOURCE_DIR}/java/TJTran.java
-    DESTINATION ${CMAKE_INSTALL_DOCDIR} COMPONENT doc)
+    DESTINATION ${CMAKE_INSTALL_FULL_DOCDIR} COMPONENT doc)
 endif()
 
 if(UNIX OR MINGW)
-  install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/cjpeg.1
-    ${CMAKE_CURRENT_SOURCE_DIR}/doc/djpeg.1
-    ${CMAKE_CURRENT_SOURCE_DIR}/doc/jpegtran.1
-    ${CMAKE_CURRENT_SOURCE_DIR}/doc/rdjpgcom.1
-    ${CMAKE_CURRENT_SOURCE_DIR}/doc/wrjpgcom.1
-    DESTINATION ${CMAKE_INSTALL_MANDIR}/man1 COMPONENT man)
+  if(WITH_TOOLS)
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/doc/cjpeg.1
+      ${CMAKE_CURRENT_SOURCE_DIR}/doc/djpeg.1
+      ${CMAKE_CURRENT_SOURCE_DIR}/doc/jpegtran.1
+      ${CMAKE_CURRENT_SOURCE_DIR}/doc/rdjpgcom.1
+      ${CMAKE_CURRENT_SOURCE_DIR}/doc/wrjpgcom.1
+      DESTINATION ${CMAKE_INSTALL_FULL_MANDIR}/man1 COMPONENT man)
+  endif()
 endif()
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pkgscripts/libjpeg.pc
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig COMPONENT lib)
+  DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig COMPONENT lib)
 if(WITH_TURBOJPEG)
   install(FILES ${CMAKE_CURRENT_BINARY_DIR}/pkgscripts/libturbojpeg.pc
-    DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig COMPONENT lib)
+    DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/pkgconfig COMPONENT lib)
 endif()
 install(FILES
   ${CMAKE_CURRENT_BINARY_DIR}/pkgscripts/${CMAKE_PROJECT_NAME}Config.cmake
   ${CMAKE_CURRENT_BINARY_DIR}/pkgscripts/${CMAKE_PROJECT_NAME}ConfigVersion.cmake
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${CMAKE_PROJECT_NAME}
+  DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/cmake/${CMAKE_PROJECT_NAME}
   COMPONENT lib)
 install(EXPORT ${CMAKE_PROJECT_NAME}Targets
   NAMESPACE ${CMAKE_PROJECT_NAME}::
-  DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${CMAKE_PROJECT_NAME}
+  DESTINATION ${CMAKE_INSTALL_FULL_LIBDIR}/cmake/${CMAKE_PROJECT_NAME}
   COMPONENT lib)
 
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/jconfig.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/jerror.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/jmorecfg.h
   ${CMAKE_CURRENT_SOURCE_DIR}/src/jpeglib.h
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} COMPONENT include)
+  DESTINATION ${CMAKE_INSTALL_FULL_INCLUDEDIR} COMPONENT include)
 
 include(cmakescripts/BuildPackages.cmake)
 
