@@ -126,8 +126,8 @@ jobs:
       if: ${{ matrix.os == 'ubuntu-latest' }}
       run: sudo apt-get update && sudo apt-get install -y nasm
 
-    - name: Install NASM (macOS – needed for x86_64 slice)
-      if: ${{ matrix.c_compiler == 'clang_macos_universal' }}
+    - name: Install NASM (macOS – needed for x86_64 slices)
+      if: ${{ matrix.c_compiler == 'clang_macos_universal' || matrix.c_compiler == 'clang_ios_sim' }}
       run: brew install nasm
 
     - name: Install NASM (Windows)
@@ -163,6 +163,8 @@ jobs:
         -DCMAKE_C_COMPILER=gcc
         -DCMAKE_CXX_COMPILER=g++
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+        -DREQUIRE_SIMD=ON
         -DENABLE_SHARED=OFF
         -DENABLE_STATIC=ON
         -DWITH_TURBOJPEG=ON
@@ -176,6 +178,8 @@ jobs:
         -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/ios.toolchain.cmake"
         -DPLATFORM=${{ matrix.ios_platform }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+        -DREQUIRE_SIMD=ON
         -DENABLE_SHARED=OFF
         -DENABLE_STATIC=ON
         -DWITH_TURBOJPEG=ON
@@ -190,6 +194,8 @@ jobs:
         -DCMAKE_C_COMPILER=cl
         -DCMAKE_CXX_COMPILER=cl
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
+        -DREQUIRE_SIMD=ON
         -DENABLE_SHARED=OFF
         -DENABLE_STATIC=ON
         -DWITH_TURBOJPEG=ON
@@ -227,6 +233,8 @@ jobs:
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+          -DREQUIRE_SIMD=ON \
           -DCMAKE_OSX_ARCHITECTURES=arm64 \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
@@ -238,6 +246,8 @@ jobs:
           -DCMAKE_C_COMPILER=clang \
           -DCMAKE_CXX_COMPILER=clang++ \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+          -DREQUIRE_SIMD=ON \
           -DCMAKE_OSX_ARCHITECTURES=x86_64 \
           -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
@@ -269,6 +279,8 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE="$TC" \
           -DPLATFORM=SIMULATORARM64 \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+          -DREQUIRE_SIMD=ON \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
           -S "$SRC"
         cmake --build "$BUILD/sim-arm64" --config "$BT" --target jpeg-static turbojpeg-static
@@ -278,6 +290,8 @@ jobs:
           -DCMAKE_TOOLCHAIN_FILE="$TC" \
           -DPLATFORM=SIMULATOR64 \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
+          -DREQUIRE_SIMD=ON \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
           -S "$SRC"
         cmake --build "$BUILD/sim-x86_64" --config "$BT" --target jpeg-static turbojpeg-static
