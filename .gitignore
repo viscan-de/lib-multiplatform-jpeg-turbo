@@ -1,0 +1,52 @@
+# Ignore CMake and build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+cmake-build-*/
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+
+# IDE/editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# macOS
+.DS_Store
+
+# Logs and temp
+*.log
+*.tmp
+*.swp
+*~
+
+# Java
+*.class
+*.jar
+
+# Python
+__pycache__/
+*.pyc
+
+# Packaging
+*.tar.gz
+*.tgz
+*.zip
+
+# Misc
+tags
