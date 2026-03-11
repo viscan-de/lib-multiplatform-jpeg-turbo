@@ -1,0 +1,370 @@
+name: Release Library
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.*'
+
+jobs:
+  create_release:
+    permissions:
+      contents: write
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
+    steps:
+      - name: Create release
+        continue-on-error: true
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+
+  release_assets:
+    name: Release assets
+    permissions:
+      contents: write
+    needs: create_release
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      # Set fail-fast to false so a failing matrix cell does not cancel all others.
+      fail-fast: false
+
+      # Matrix covers:
+      #   linux     – gcc on ubuntu-latest (x86_64)
+      #   windows   – MSVC cl on windows-latest (x64)
+      #   darwin    – clang on macos-latest, universal arm64+x86_64
+      #   ios       – clang via ios-cmake toolchain, device arm64
+      #   ios-sim   – clang via ios-cmake toolchain, universal arm64+x86_64
+      # Note: libjpeg-turbo's CMake rejects multi-arch OSX_ARCHITECTURES, so
+      # universal builds are achieved via two separate cmake invocations + lipo.
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release]
+        c_compiler: [gcc, cl, clang_macos_universal, clang_ios_os, clang_ios_sim]
+        include:
+          - os: ubuntu-latest
+            c_compiler: gcc
+            cpp_compiler: g++
+            platform: linux
+            arch: x86_64
+
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+            platform: windows
+            arch: x64
+
+          # macOS universal (arm64 + x86_64)
+          - os: macos-latest
+            c_compiler: clang_macos_universal
+            cpp_compiler: clang++
+            env: macos
+            platform: darwin
+            arch: arm64-x86_64
+
+          # iOS device – arm64
+          - os: macos-latest
+            c_compiler: clang_ios_os
+            cpp_compiler: clang++
+            ios_platform: OS64
+            env: ios
+            platform: darwin
+            arch: ios-arm64
+
+          # iOS Simulator – universal (arm64 + x86_64)
+          - os: macos-latest
+            c_compiler: clang_ios_sim
+            cpp_compiler: clang++
+            env: ios_sim
+            platform: darwin
+            arch: ios-sim-arm64-x86_64
+
+        exclude:
+          - os: ubuntu-latest
+            c_compiler: cl
+          - os: ubuntu-latest
+            c_compiler: clang_macos_universal
+          - os: ubuntu-latest
+            c_compiler: clang_ios_os
+          - os: ubuntu-latest
+            c_compiler: clang_ios_sim
+          - os: windows-latest
+            c_compiler: gcc
+          - os: windows-latest
+            c_compiler: clang_macos_universal
+          - os: windows-latest
+            c_compiler: clang_ios_os
+          - os: windows-latest
+            c_compiler: clang_ios_sim
+          - os: macos-latest
+            c_compiler: gcc
+          - os: macos-latest
+            c_compiler: cl
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - uses: maxim-lobanov/setup-xcode@v1
+      if: ${{ matrix.os == 'macos-latest' }}
+      with:
+        xcode-version: latest-stable
+
+    # ── NASM ────────────────────────────────────────────────────────────────
+    # Required for x86 / x86_64 SIMD. ARM builds (iOS, macOS arm64) use ARM
+    # Neon intrinsics and do not need NASM.
+
+    - name: Install NASM (Linux)
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: sudo apt-get update && sudo apt-get install -y nasm
+
+    - name: Install NASM (macOS – needed for x86_64 slice)
+      if: ${{ matrix.c_compiler == 'clang_macos_universal' }}
+      run: brew install nasm
+
+    - name: Install NASM (Windows)
+      if: ${{ matrix.os == 'windows-latest' }}
+      uses: ilammy/setup-nasm@v1
+
+    # ── iOS toolchain ────────────────────────────────────────────────────────
+    # Download the leetal/ios-cmake toolchain file for iOS / Simulator builds.
+
+    - name: Download iOS CMake toolchain
+      if: ${{ matrix.os == 'macos-latest' && matrix.env != 'macos' }}
+      run: |
+        curl -fsSL -o "${{ github.workspace }}/ios.toolchain.cmake" \
+          https://raw.githubusercontent.com/leetal/ios-cmake/master/ios.toolchain.cmake
+
+    # ── Reusable strings ─────────────────────────────────────────────────────
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=$(echo "${{ github.workspace }}/build" | sed -e 's/\\/\//g')" >> "$GITHUB_OUTPUT"
+        echo "workspace-dir=$(echo "${{ github.workspace }}" | sed -e 's/\\/\//g')" >> "$GITHUB_OUTPUT"
+        echo "tag=${GITHUB_REF#refs/*/}" >> "$GITHUB_OUTPUT"
+        mkdir -p "${{ github.workspace }}/build"
+
+    # ── CMake configure ──────────────────────────────────────────────────────
+
+    - name: Configure CMake (Linux)
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_C_COMPILER=gcc
+        -DCMAKE_CXX_COMPILER=g++
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DENABLE_SHARED=OFF
+        -DENABLE_STATIC=ON
+        -DWITH_TURBOJPEG=ON
+        -DWITH_JAVA=OFF
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (iOS device)
+      if: ${{ matrix.c_compiler == 'clang_ios_os' }}
+      run: >
+        cmake -GXcode -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/ios.toolchain.cmake"
+        -DPLATFORM=${{ matrix.ios_platform }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DENABLE_SHARED=OFF
+        -DENABLE_STATIC=ON
+        -DWITH_TURBOJPEG=ON
+        -DWITH_JAVA=OFF
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (Windows)
+      if: ${{ matrix.os == 'windows-latest' }}
+      shell: bash
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_C_COMPILER=cl
+        -DCMAKE_CXX_COMPILER=cl
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DENABLE_SHARED=OFF
+        -DENABLE_STATIC=ON
+        -DWITH_TURBOJPEG=ON
+        -DWITH_JAVA=OFF
+        -S ${{ steps.strings.outputs.workspace-dir }}
+
+    # ── Build ────────────────────────────────────────────────────────────────
+    # Build only the static library targets; skip executables so that
+    # cross-compilation (iOS) does not fail on host-only tools.
+
+    - name: Build
+      if: ${{ matrix.c_compiler != 'clang_macos_universal' && matrix.c_compiler != 'clang_ios_sim' }}
+      shell: bash
+      run: |
+        cmake --build ${{ steps.strings.outputs.build-output-dir }} \
+          --config ${{ matrix.build_type }} \
+          --target jpeg-static turbojpeg-static
+
+    # ── macOS universal build + lipo ──────────────────────────────────────────
+    # libjpeg-turbo's CMake rejects multi-arch OSX_ARCHITECTURES, so each
+    # architecture slice is built separately, then combined with lipo.
+
+    - name: Build macOS universal (arm64 + x86_64)
+      if: ${{ matrix.c_compiler == 'clang_macos_universal' }}
+      env:
+        MACOSX_DEPLOYMENT_TARGET: "13.0"
+      run: |
+        set -e
+        BUILD="${{ steps.strings.outputs.build-output-dir }}"
+        SRC="${{ github.workspace }}"
+        BT="${{ matrix.build_type }}"
+
+        # ── arm64 slice ──
+        cmake -B "$BUILD/arm64" \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_OSX_ARCHITECTURES=arm64 \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET \
+          -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
+          -S "$SRC"
+        cmake --build "$BUILD/arm64" --config "$BT" --target jpeg-static turbojpeg-static
+
+        # ── x86_64 slice ──
+        cmake -B "$BUILD/x86_64" \
+          -DCMAKE_C_COMPILER=clang \
+          -DCMAKE_CXX_COMPILER=clang++ \
+          -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+          -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET \
+          -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
+          -S "$SRC"
+        cmake --build "$BUILD/x86_64" --config "$BT" --target jpeg-static turbojpeg-static
+
+        # ── lipo ──
+        mkdir -p "$BUILD/lib"
+        lipo -create "$BUILD/arm64/libjpeg.a"      "$BUILD/x86_64/libjpeg.a"      -output "$BUILD/lib/libjpeg.a"
+        lipo -create "$BUILD/arm64/libturbojpeg.a" "$BUILD/x86_64/libturbojpeg.a" -output "$BUILD/lib/libturbojpeg.a"
+        lipo -info "$BUILD/lib/libjpeg.a"
+
+        # Copy jconfig.h to build root for the collect step
+        cp "$BUILD/arm64/jconfig.h" "$BUILD/jconfig.h"
+
+    # ── iOS Simulator universal build + lipo ──────────────────────────────────
+
+    - name: Build iOS Simulator universal (arm64 + x86_64)
+      if: ${{ matrix.c_compiler == 'clang_ios_sim' }}
+      run: |
+        set -e
+        BUILD="${{ steps.strings.outputs.build-output-dir }}"
+        SRC="${{ github.workspace }}"
+        BT="${{ matrix.build_type }}"
+        TC="${{ github.workspace }}/ios.toolchain.cmake"
+
+        # ── arm64 simulator slice ──
+        cmake -GXcode -B "$BUILD/sim-arm64" \
+          -DCMAKE_TOOLCHAIN_FILE="$TC" \
+          -DPLATFORM=SIMULATORARM64 \
+          -DCMAKE_BUILD_TYPE="$BT" \
+          -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
+          -S "$SRC"
+        cmake --build "$BUILD/sim-arm64" --config "$BT" --target jpeg-static turbojpeg-static
+
+        # ── x86_64 simulator slice ──
+        cmake -GXcode -B "$BUILD/sim-x86_64" \
+          -DCMAKE_TOOLCHAIN_FILE="$TC" \
+          -DPLATFORM=SIMULATOR64 \
+          -DCMAKE_BUILD_TYPE="$BT" \
+          -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
+          -S "$SRC"
+        cmake --build "$BUILD/sim-x86_64" --config "$BT" --target jpeg-static turbojpeg-static
+
+        # ── lipo ──
+        mkdir -p "$BUILD/lib"
+        # Xcode places outputs under Release-iphonesimulator/
+        ARM64_DIR="$BUILD/sim-arm64/Release-iphonesimulator"
+        X86_DIR="$BUILD/sim-x86_64/Release-iphonesimulator"
+        lipo -create "$ARM64_DIR/libjpeg.a"      "$X86_DIR/libjpeg.a"      -output "$BUILD/lib/libjpeg.a"
+        lipo -create "$ARM64_DIR/libturbojpeg.a" "$X86_DIR/libturbojpeg.a" -output "$BUILD/lib/libturbojpeg.a"
+        lipo -info "$BUILD/lib/libjpeg.a"
+
+        # Copy jconfig.h to build root for the collect step
+        cp "$BUILD/sim-arm64/jconfig.h" "$BUILD/jconfig.h"
+
+    # ── Collect artifacts ────────────────────────────────────────────────────
+
+    - name: Collect libraries and headers
+      shell: bash
+      run: |
+        BUILD="${{ steps.strings.outputs.build-output-dir }}"
+        SRC="${{ github.workspace }}"
+        ARTIFACT="$BUILD/artifact"
+        mkdir -p "$ARTIFACT/lib" "$ARTIFACT/include"
+
+        # ---- Static libraries ----
+        # find handles all generator layouts:
+        #   Makefile / lipo output:  build/lib/libjpeg.a
+        #   Xcode (iOS device):      build/Release-iphoneos/libjpeg.a
+        #   Visual Studio:           build/Release/jpeg-static.lib
+        # The per-arch slice subdirs (arm64/, x86_64/, sim-arm64/, sim-x86_64/)
+        # used by the universal build steps are excluded to avoid picking up
+        # the unlinked individual slices instead of the lipo'd result.
+        find "$BUILD" \
+          \( -name "libjpeg.a" -o -name "libturbojpeg.a" \
+          -o -name "jpeg-static.lib" -o -name "turbojpeg-static.lib" \) \
+          -not -path "*/artifact/*" \
+          -not -path "*/arm64/*" \
+          -not -path "*/x86_64/*" \
+          -not -path "*/sim-arm64/*" \
+          -not -path "*/sim-x86_64/*" \
+          -exec cp {} "$ARTIFACT/lib/" \;
+
+        ls -lah "$ARTIFACT/lib/"
+
+        # ---- Public headers ----
+        # jpeglib / jerror / jmorecfg come from the source tree;
+        # jconfig.h is generated by CMake and lives in the build root.
+        cp "$SRC/src/jpeglib.h"    "$ARTIFACT/include/"
+        cp "$SRC/src/jerror.h"     "$ARTIFACT/include/"
+        cp "$SRC/src/jmorecfg.h"   "$ARTIFACT/include/"
+        cp "$SRC/src/turbojpeg.h"  "$ARTIFACT/include/"
+        cp "$BUILD/jconfig.h"      "$ARTIFACT/include/"
+
+    # ── Package ──────────────────────────────────────────────────────────────
+
+    - name: Create release marker
+      shell: bash
+      run: |
+        touch "${{ steps.strings.outputs.build-output-dir }}/artifact/viscan-${{ matrix.platform }}.${{ matrix.arch }}-${{ matrix.c_compiler }}.libjpeg-turbo-release-${{ steps.strings.outputs.tag }}"
+
+    - name: Compress artifacts (Linux + macOS)
+      if: ${{ matrix.os != 'windows-latest' }}
+      shell: bash
+      run: |
+        cd "${{ steps.strings.outputs.build-output-dir }}/artifact"
+        zip -r -q \
+          "../${{ matrix.platform }}.${{ matrix.arch }}-${{ matrix.c_compiler }}.libjpeg-turbo.zip" \
+          ./include ./lib \
+          "viscan-${{ matrix.platform }}.${{ matrix.arch }}-${{ matrix.c_compiler }}.libjpeg-turbo-release-${{ steps.strings.outputs.tag }}"
+
+    - name: Compress artifacts (Windows)
+      if: ${{ matrix.os == 'windows-latest' }}
+      run: |
+        $artifact = "${{ steps.strings.outputs.build-output-dir }}\artifact"
+        $zip = "${{ steps.strings.outputs.build-output-dir }}\${{ matrix.platform }}.${{ matrix.arch }}-${{ matrix.c_compiler }}.libjpeg-turbo.zip"
+        $marker = "viscan-${{ matrix.platform }}.${{ matrix.arch }}-${{ matrix.c_compiler }}.libjpeg-turbo-release-${{ steps.strings.outputs.tag }}"
+        Compress-Archive `
+          -Path "$artifact\include","$artifact\lib","$artifact\$marker" `
+          -DestinationPath $zip
+
+    # ── Upload to release ─────────────────────────────────────────────────────
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: startsWith(github.ref, 'refs/tags/')
+      with:
+        files: |
+          ${{ steps.strings.outputs.build-output-dir }}/*.zip
