@@ -174,10 +174,11 @@ jobs:
     - name: Configure CMake (iOS device)
       if: ${{ matrix.c_compiler == 'clang_ios_os' }}
       run: >
-        cmake -GXcode -B ${{ steps.strings.outputs.build-output-dir }}
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/ios.toolchain.cmake"
         -DPLATFORM=${{ matrix.ios_platform }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON
         -DREQUIRE_SIMD=ON
         -DENABLE_SHARED=OFF
         -DENABLE_STATIC=ON
@@ -274,20 +275,22 @@ jobs:
         TC="${{ github.workspace }}/ios.toolchain.cmake"
 
         # ── arm64 simulator slice ──
-        cmake -GXcode -B "$BUILD/sim-arm64" \
+        cmake -B "$BUILD/sim-arm64" \
           -DCMAKE_TOOLCHAIN_FILE="$TC" \
           -DPLATFORM=SIMULATORARM64 \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
           -DREQUIRE_SIMD=ON \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
           -S "$SRC"
         cmake --build "$BUILD/sim-arm64" --config "$BT" --target jpeg-static turbojpeg-static
 
         # ── x86_64 simulator slice ──
-        cmake -GXcode -B "$BUILD/sim-x86_64" \
+        cmake -B "$BUILD/sim-x86_64" \
           -DCMAKE_TOOLCHAIN_FILE="$TC" \
           -DPLATFORM=SIMULATOR64 \
           -DCMAKE_BUILD_TYPE="$BT" \
+          -DCMAKE_INTERPROCEDURAL_OPTIMIZATION=ON \
           -DREQUIRE_SIMD=ON \
           -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_TURBOJPEG=ON -DWITH_JAVA=OFF \
           -S "$SRC"
@@ -295,9 +298,9 @@ jobs:
 
         # ── lipo ──
         mkdir -p "$BUILD/lib"
-        # Xcode places outputs under Release-iphonesimulator/
-        ARM64_DIR="$BUILD/sim-arm64/Release-iphonesimulator"
-        X86_DIR="$BUILD/sim-x86_64/Release-iphonesimulator"
+        # Unix Makefiles generator places outputs directly in the build root
+        ARM64_DIR="$BUILD/sim-arm64"
+        X86_DIR="$BUILD/sim-x86_64"
         lipo -create "$ARM64_DIR/libjpeg.a"      "$X86_DIR/libjpeg.a"      -output "$BUILD/lib/libjpeg.a"
         lipo -create "$ARM64_DIR/libturbojpeg.a" "$X86_DIR/libturbojpeg.a" -output "$BUILD/lib/libturbojpeg.a"
         lipo -info "$BUILD/lib/libjpeg.a"
